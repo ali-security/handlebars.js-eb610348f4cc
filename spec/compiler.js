@@ -128,6 +128,32 @@ describe('compiler', function() {
       );
     });
 
+    it('should ignore loc metadata while validating AST nodes', function() {
+      equal(
+        Handlebars.compile({
+          type: 'Program',
+          meta: null,
+          loc: { source: 'fake', start: { line: 1, column: 0 } },
+          body: [{ type: 'ContentStatement', value: 'Hello' }]
+        })(),
+        'Hello'
+      );
+    });
+
+    it('should accept AST with valid NumberLiteral values', function() {
+      equal(
+        Handlebars.compile(Handlebars.parse('{{lookup this 1}}'))(['a', 'b']),
+        'b'
+      );
+    });
+
+    it('should accept AST with valid BooleanLiteral values', function() {
+      equal(
+        Handlebars.compile(Handlebars.parse('{{#if true}}ok{{/if}}'))({}),
+        'ok'
+      );
+    });
+
     it('can pass through an empty string', function() {
       equal(Handlebars.compile('')(), '');
     });
