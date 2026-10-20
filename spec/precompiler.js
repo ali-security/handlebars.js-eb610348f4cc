@@ -182,7 +182,7 @@ describe('precompiler', function() {
       return 'amd';
     };
     Precompiler.cli({ templates: [emptyTemplate], amd: true, partial: true });
-    equal(/return Handlebars\.partials\['empty'\]/.test(log), true);
+    equal(/return Handlebars\.partials\["empty"\]/.test(log), true);
     equal(/template\(amd\)/.test(log), true);
   });
   it('should output multiple amd partials', function() {
@@ -402,6 +402,127 @@ describe('precompiler', function() {
       Precompiler.loadTemplates({}, function(err, opts) {
         equal(opts.templates.length, 0);
         done(err);
+      });
+    });
+  });
+
+  describe('GHSA-xjpj-3mr7-gcpf: precompiler output escaping', function() {
+    var FullHandlebars = require('../dist/cjs/handlebars')['default'];
+
+    function runCliAndCaptureOutput(options) {
+      var output = '';
+      var oldLog = console.log;
+      console.log = function() {
+        output += Array.prototype.join.call(arguments, '');
+      };
+
+      try {
+        Precompiler.cli(options);
+      } finally {
+        console.log = oldLog;
+      }
+
+      return output;
+    }
+
+    it('should not inject raw template names into generated code', function() {
+      var output = runCliAndCaptureOutput({
+        templates: [
+          {
+            name: "evil'];global.__xjpjName=1;//",
+            source: ''
+          }
+        ],
+        amd: true
+      });
+
+      expect(output).to.not.match(/\['evil'\];global\.__xjpjName=1/);
+    });
+
+    it('should not inject raw commonjs option values into generated code', function() {
+      var output = runCliAndCaptureOutput({
+        templates: [{ name: 'safe', source: '' }],
+        commonjs: 'handlebars");global.__xjpjCommon=1;//'
+      });
+
+      expect(output).to.not.match(
+        /require\("handlebars"\);global\.__xjpjCommon=1/
+      );
+    });
+
+    it('should reject invalid namespace expressions', function() {
+      expect(function() {
+        runCliAndCaptureOutput({
+          templates: [{ name: 'safe', source: '' }],
+          namespace: 'App.ns;global.__xjpjNamespace=1;//'
+        });
+      }).to.throw(/Invalid namespace/);
+    });
+
+    it('should sanitize sourceMappingURL comment values', function() {
+      var oldPrecompile = FullHandlebars.precompile;
+      var oldWriteFileSync = fs.writeFileSync;
+      FullHandlebars.precompile = function() {
+        return {
+          code: '""',
+          map: '{"version":3,"sources":[],"names":[],"mappings":""}'
+        };
+      };
+      fs.writeFileSync = function() {};
+
+      var output;
+      try {
+        output = runCliAndCaptureOutput({
+          templates: [{ name: 'safe', source: '' }],
+          map: 'good.js.map\n;global.__xjpjMap=1;//'
+        });
+      } finally {
+        FullHandlebars.precompile = oldPrecompile;
+        fs.writeFileSync = oldWriteFileSync;
+      }
+
+      expect(output).to.not.match(
+        /sourceMappingURL=[^\n]*\n;global\.__xjpjMap=1/
+      );
+    });
+
+    function runCliWithSourceMap(options) {
+      var oldWriteFileSync = fs.writeFileSync;
+      fs.writeFileSync = function() {};
+      try {
+        return runCliAndCaptureOutput(options);
+      } finally {
+        fs.writeFileSync = oldWriteFileSync;
+      }
+    }
+
+    it('should sanitize sourceMappingURL comment values when minifying', function() {
+      var output = runCliWithSourceMap({
+        templates: [{ name: 'safe', path: 'safe.handlebars', source: 'x' }],
+        min: true,
+        map: 'good.js.map\n;global.__xjpjMinMap=1;//'
+      });
+
+      expect(output).to.contain(
+        'sourceMappingURL=good.js.map;global.__xjpjMinMap=1;//'
+      );
+      expect(output).to.not.match(
+        /sourceMappingURL=[^\n]*\n;global\.__xjpjMinMap=1/
+      );
+    });
+
+    it('should percent-encode "<" in sourceMappingURL comment values', function() {
+      [false, true].forEach(function(min) {
+        var output = runCliWithSourceMap({
+          templates: [{ name: 'safe', path: 'safe.handlebars', source: 'x' }],
+          min: min,
+          map: '</script><!--<script>.map'
+        });
+
+        expect(output).to.contain(
+          'sourceMappingURL=%3C/script>%3C!--%3Cscript>.map'
+        );
+        expect(output).to.not.match(/<(!--|\/?script)/i);
       });
     });
   });
