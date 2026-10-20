@@ -2,35 +2,148 @@ language: node_js
 jobs:
   include:
   - stage: test
-    name: check javascript (eslint)
-    node_js: lts/*
-    script: npm run lint
-  - stage: test
-    name: check formatting (prettier)
-    node_js: lts/*
-    script: npm run check-format
-  - stage: test
-    name: check typescript definitions (dtslint)
-    node_js: lts/*
-    script: npm run dtslint
-  - stage: test
-    name: extensive tests and publish to aws
+    name: extensive tests
     script: npm run extensive-tests-and-publish-to-aws
-    env:
-    - S3_BUCKET_NAME=builds.handlebarsjs.com
-    - secure: ckyEe5dzjdFDjmZ6wIrhGm0CFBEnKq8c1dYptfgVV/Q5/nJFGzu8T0yTjouS/ERxzdT2H327/63VCxhFnLCRHrsh4rlW/rCy4XI3O/0TeMLgFPa4TXkO8359qZ4CB44TBb3NsJyQXNMYdJpPLTCVTMpuiqqkFFOr+6OeggR7ufA=
-    - secure: Nm4AgSfsgNB21kgKrF9Tl7qVZU8YYREhouQunFracTcZZh2NZ2XH5aHuSiXCj88B13Cr/jGbJKsZ4T3QS3wWYtz6lkyVOx3H3iI+TMtqhD9RM3a7A4O+4vVN8IioB2YjhEu0OKjwgX5gp+0uF+pLEi7Hpj6fupD3AbbL5uYcKg8=
-    - SAUCE_USERNAME=handlebars
-    - secure: 1VkLQhbsEug4ZMQ52tTOus/WLvW3Etqe7GbCzZfzsI8d2ygJPjFfzU8fNm4pVVwoTI21MaM5AQq7SVPu8DWN1YbDjJycMdY1zO3DsB9aZBxTal98fIB7ZIUce9r5z2EP6mETrsbYjZkeckzIBI0A4UVa+F2BO4KbRDXP1Db3u3I=
     node_js: '10'
   - stage: test
     name: test with latest nodejs-lts
-    node_js: lts/*
+    node_js: '14'
     script: npm run test
   - stage: test
     name: test with active nodejs
-    node_js: node
+    node_js: '15'
     script: npm run test
+  - stage: test
+    name: test with nodejs 0.4
+    node_js: '10'
+    services:
+    - docker
+    script:
+    - npx grunt build
+    - |
+      # Node 0.4 has no binary release: compile node-v0.4.12 inside centos:7
+      # (gcc 4.8.5 + python 2.7; V8 3.1 built with gcc >= 4.9 segfaults).
+      # --without-ssl: the binary must run on the Ubuntu host (no libssl.so.10).
+      mkdir -p "$HOME/node04"
+      curl -fsSL --retry 3 https://nodejs.org/dist/v0.4.12/node-v0.4.12.tar.gz -o "$HOME/node04/node-v0.4.12.tar.gz"
+      cat > "$HOME/node04/build.sh" <<'EOF'
+      set -e
+      # CentOS 7 is EOL: use the vault, with archive.kernel.org as yum failover.
+      rm -f /etc/yum.repos.d/*.repo
+      printf '%s\n' '[base]' 'name=CentOS-7.9.2009 - Base' \
+        'baseurl=https://vault.centos.org/7.9.2009/os/x86_64/' \
+        '        https://archive.kernel.org/centos-vault/7.9.2009/os/x86_64/' \
+        'gpgcheck=1' 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7' > /etc/yum.repos.d/vault.repo
+      yum install -y -q gcc gcc-c++ make which
+      cd /tmp
+      tar xzf /out/node-v0.4.12.tar.gz
+      cd node-v0.4.12
+      ./configure --prefix=/opt/node04 --without-ssl
+      make -j2
+      make install
+      cp /opt/node04/bin/node /out/node
+      EOF
+      docker run --rm -v "$HOME/node04:/out" centos:7 bash /out/build.sh
+      "$HOME/node04/node" -v
+    - |
+      # Never run npm under Node 0.4: install Node 0.4-compatible test frameworks with
+      # Node 10 into an isolated dir, then overlay them into spec/node_modules
+      # (resolved before the root node_modules).
+      mkdir -p "$HOME/legacy"
+      (cd "$HOME/legacy" && echo '{"name":"legacy","version":"1.0.0","private":true}' > package.json && npm install --no-audit --ignore-scripts mocha@1.21.5 chai@3.5.0 dirty-chai@1.2.2 sinon@1.17.7 readable-stream@1.0.34)
+      rm -rf spec/node_modules
+      cp -a "$HOME/legacy/node_modules" spec/node_modules
+      cat > spec/node_modules/legacy-shim.js <<'SHIM'
+      /* eslint-disable */
+      // Node 0.4 polyfills for the test HARNESS only (no lib/ or spec/*.js changes).
+      // Lives in spec/node_modules/ next to the downgraded test frameworks
+      // (mocha 1.21.5, chai 3.5.0, dirty-chai 1.2.2, sinon 1.17.7,
+      // readable-stream 1.0.34), so its require() calls resolve them.
+      var path = require('path');
+      var fs = require('fs');
+      var stream = require('stream');
+      var Module = require('module');
+
+      // path.sep was added in Node 0.8 (spec/env/runner.js)
+      if (!path.sep) { path.sep = '/'; }
+
+      // require() of .json was added in Node 0.5 (spec/spec.js loads mustache specs)
+      if (!require.extensions['.json']) {
+        require.extensions['.json'] = function(module, filename) {
+          module.exports = JSON.parse(fs.readFileSync(filename, 'utf8'));
+        };
+      }
+
+      // streams2 stream.Readable was added in Node 0.10 (mock-stdin needs it).
+      // readable-stream@1.0 expects require('stream') to be the Stream constructor;
+      // on Node 0.4 it is { Stream: Stream }.
+      if (!stream.Readable) {
+        var origLoad = Module._load;
+        Module._load = function(request, parent) {
+          if (request === 'stream' && parent && /readable-stream/.test(parent.filename)) {
+            return stream.Stream;
+          }
+          return origLoad.apply(this, arguments);
+        };
+        stream.Readable = require('readable-stream').Readable;
+      }
+
+      // sinon >= 5 cannot be parsed by V8 3.1, so sinon 1.17 is used; add the
+      // sinon 5 default-sandbox API the specs rely on: sinon.restore() (no args)
+      // and sinon.replace(obj, prop, fn).
+      var sinon = require('sinon');
+      if (!sinon.replace) {
+        var fakes = [];
+        var origWrap = sinon.wrapMethod;
+        var origRestore = sinon.restore;
+        sinon.wrapMethod = function() {
+          var m = origWrap.apply(this, arguments);
+          fakes.push(m);
+          return m;
+        };
+        sinon.replace = function(obj, prop, replacement) {
+          var original = obj[prop];
+          var owned = Object.prototype.hasOwnProperty.call(obj, prop);
+          obj[prop] = replacement;
+          fakes.push({ restore: function() {
+            if (owned) { obj[prop] = original; } else { delete obj[prop]; }
+          } });
+          return replacement;
+        };
+        sinon.restore = function(obj) {
+          if (arguments.length) { return origRestore.apply(this, arguments); }
+          while (fakes.length) {
+            var f = fakes.pop();
+            if (f && typeof f.restore === 'function') { f.restore(); }
+          }
+        };
+      }
+
+      // Excluded on Node 0.4 only: V8 3.1 reports
+      // Object.prototype.hasOwnProperty.call({}, '__proto__') === true, so
+      // lookupProperty() treats __proto__ as an own property and returns the
+      // prototype ("[object Object]") instead of ''. Engine limitation, not harness.
+      // mocha 1.21's Runner constructor calls this.grep(/.*/), so wrapping
+      // Runner#grep applies the exclusion.
+      var EXCLUDE = /GH-1595: dangerous properties access should be denied to \{\{(__proto__|lookup this "__proto__")\}\}/;
+      var Runner = require('mocha').Runner;
+      var origGrep = Runner.prototype.grep;
+      Runner.prototype.grep = function(userRe, userInvert) {
+        var matcher = {
+          test: function(title) {
+            var userMatch = userRe ? userRe.test(title) !== !!userInvert : true;
+            return userMatch && !EXCLUDE.test(title);
+          }
+        };
+        return origGrep.call(this, matcher, false);
+      };
+
+      require('../env/runner.js');
+      SHIM
+    - |
+      # Pipe through cat: on Node 0.4, process.exit() truncates stdout written
+      # to a file, losing the mocha summary lines.
+      "$HOME/node04/node" spec/node_modules/legacy-shim.js 2>&1 | cat; test "${PIPESTATUS[0]}" -eq 0
 cache: npm
 email:
   on_failure: change

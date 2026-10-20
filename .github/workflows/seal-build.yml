@@ -1,0 +1,40 @@
+name: Seal build
+
+# Build-and-pack only: the test suite runs on Travis (.travis.yml).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pack:
+    name: Build and pack (Node 10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # the Node release the public tarball was packed with (npm 6.14.11)
+          node-version: '10.23.3'
+
+      - name: Install dependencies
+        # the lockfile pins every version + integrity; the time-machine registry
+        # in .npmrc 404s on the deprecated urix@0.1.0 metadata
+        run: npm ci --registry=https://registry.npmjs.org/
+
+      - name: Build release dist
+        # 'default' minus the 'test' task and the cdnjs/components copies that
+        # are not in the published "files"
+        run: npx grunt clean build amd uglify copy:dist
+
+      - name: Pack
+        run: npm pack
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: handlebars-tgz
+          path: handlebars-*.tgz
+          if-no-files-found: error

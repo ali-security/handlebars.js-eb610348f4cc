@@ -278,8 +278,7 @@ module.exports = function(grunt) {
     'default',
     'bgShell:integrationTests',
     'sauce',
-    'metrics',
-    'publish-to-aws'
+    'metrics'
   ]);
   grunt.registerTask('on-file-change', [
     'build',
